@@ -1,0 +1,143 @@
+const globalToggle = document.getElementById("globalToggle");
+const siteToggle = document.getElementById("siteToggle");
+const siteHost = document.getElementById("siteHost");
+const statusDot = document.getElementById("statusDot");
+const statusText = document.getElementById("statusText");
+const statusDetail = document.getElementById("statusDetail");
+const originalBtn = document.getElementById("originalBtn");
+const retranslateBtn = document.getElementById("retranslateBtn");
+
+let currentHost = null;
+let currentTabId = null;
+let pollTimer = null;
+
+const langNames = new Intl.DisplayNames(["en"], { type: "language" });
+
+function languageName(code) {
+  if (!code || code === "und") return "Unknown language";
+  try {
+    return langNames.of(code);
+  } catch {
+    return code;
+  }
+}
+
+function setStatus(dotClass, text, detail) {
+  statusDot.className = "status-dot " + dotClass;
+  statusText.textContent = text;
+  statusDetail.textContent = detail || "";
+}
+
+function queryContentScript(message) {
+  return new Promise((resolve) => {
+    if (currentTabId === null) {
+      resolve(null);
+      return;
+    }
+    chrome.tabs.sendMessage(currentTabId, message, { frameId: 0 }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+function renderStatus(s) {
+  if (!s) {
+    setStatus("off", "Not available on this page", "Try a regular website tab.");
+    originalBtn.disabled = true;
+    retranslateBtn.disabled = true;
+    return;
+  }
+
+  currentHost = s.host;
+  siteHost.textContent = s.host;
+  siteToggle.checked = !s.siteDisabled;
+  siteToggle.disabled = !globalToggle.checked;
+
+  const lang = languageName(s.detectedLang);
+  const count = s.translatedCount;
+
+  switch (s.status) {
+    case "detecting":
+      setStatus("busy", "Detecting language\u2026");
+      break;
+    case "translating":
+      setStatus("busy", "Translating\u2026", count > 0 ? `${count} segments so far` : "");
+      break;
+    case "done":
+      setStatus(
+        "ok",
+        count > 0 ? `Translated from ${lang}` : "Nothing needed translating",
+        count > 0 ? `${count} text segments replaced with English` : ""
+      );
+      break;
+    case "english":
+      setStatus("ok", "Already in English", "No translation needed.");
+      break;
+    case "disabled":
+      setStatus("off", "Translation is off", "Turn it on with the switches below.");
+      break;
+    case "error":
+      setStatus("error", "Translation failed", "Check your connection and try again.");
+      break;
+    default:
+      setStatus("off", "Waiting\u2026");
+  }
+
+  originalBtn.disabled = count === 0;
+  originalBtn.textContent = s.showingOriginal ? "Show translation" : "Show original";
+  retranslateBtn.disabled = !s.enabled || s.siteDisabled;
+}
+
+async function refreshStatus() {
+  const s = await queryContentScript({ type: "getStatus" });
+  renderStatus(s);
+  // Keep polling while the page is actively being translated.
+  if (s && (s.status === "detecting" || s.status === "translating")) {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(refreshStatus, 600);
+  }
+}
+
+async function init() {
+  const cfg = await chrome.storage.sync.get({ enabled: true, disabledSites: [] });
+  globalToggle.checked = cfg.enabled;
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab && tab.id !== undefined && /^(https?|file):/.test(tab.url || "")) {
+    currentTabId = tab.id;
+  }
+  await refreshStatus();
+}
+
+globalToggle.addEventListener("change", async () => {
+  await chrome.storage.sync.set({ enabled: globalToggle.checked });
+  siteToggle.disabled = !globalToggle.checked;
+  setTimeout(refreshStatus, 300);
+});
+
+siteToggle.addEventListener("change", async () => {
+  if (!currentHost) return;
+  const { disabledSites } = await chrome.storage.sync.get({ disabledSites: [] });
+  const set = new Set(disabledSites);
+  if (siteToggle.checked) set.delete(currentHost);
+  else set.add(currentHost);
+  await chrome.storage.sync.set({ disabledSites: [...set] });
+  setTimeout(refreshStatus, 300);
+});
+
+originalBtn.addEventListener("click", async () => {
+  await queryContentScript({ type: "toggleOriginal" });
+  refreshStatus();
+});
+
+retranslateBtn.addEventListener("click", async () => {
+  retranslateBtn.disabled = true;
+  queryContentScript({ type: "retranslate" });
+  setTimeout(refreshStatus, 400);
+});
+
+init();

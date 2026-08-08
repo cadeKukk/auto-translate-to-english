@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="logo">A<span class="arrow">&#8594;</span>EN</div>
+    <div class="titles">
+      <h1>Auto Translate</h1>
+      <p>Everything in English, automatically</p>
+    </div>
+  </div>
+
+  <div class="status-card" id="statusCard">
+    <div class="status-row">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Checking this page&hellip;</span>
+    </div>
+    <div class="status-detail" id="statusDetail"></div>
+  </div>
+
+  <div class="controls">
+    <label class="control-row">
+      <div class="control-label">
+        <span class="control-title">Auto-translate</span>
+        <span class="control-sub">Applies to all sites</span>
+      </div>
+      <span class="switch">
+        <input type="checkbox" id="globalToggle" />
+        <span class="slider"></span>
+      </span>
+    </label>
+
+    <label class="control-row">
+      <div class="control-label">
+        <span class="control-title">Enable on this site</span>
+        <span class="control-sub" id="siteHost">&nbsp;</span>
+      </div>
+      <span class="switch">
+        <input type="checkbox" id="siteToggle" />
+        <span class="slider"></span>
+      </span>
+    </label>
+  </div>
+
+  <div class="actions">
+    <button id="originalBtn" class="btn secondary" disabled>Show original</button>
+    <button id="retranslateBtn" class="btn primary" disabled>Translate again</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
