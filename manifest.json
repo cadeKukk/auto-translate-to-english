@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto Translate to English",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Automatically detects the language of any webpage and seamlessly replaces its text with English translations.",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["https://translate.googleapis.com/*"],

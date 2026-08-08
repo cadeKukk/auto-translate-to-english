@@ -29,15 +29,39 @@ function cacheSet(text, result) {
   cache.set(text, result);
 }
 
+// Space out requests so bursts (e.g. fast scrolling) don't trip rate limits.
+const MIN_REQUEST_GAP_MS = 250;
+let nextRequestAt = 0;
+
+function politeDelay() {
+  const now = Date.now();
+  const wait = Math.max(0, nextRequestAt - now);
+  nextRequestAt = now + wait + MIN_REQUEST_GAP_MS;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
+// Fetch with pacing and backoff on rate-limit/server errors.
+async function fetchTranslation(url, options, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    await politeDelay();
+    const res = await fetch(url, options);
+    if (res.ok) return res;
+    const retryable = res.status === 429 || res.status >= 500;
+    if (!retryable || i === attempts - 1) {
+      throw new Error("Translate request failed: HTTP " + res.status);
+    }
+    await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+  }
+}
+
 // Batch endpoint: POST q=...&q=... -> [["translated","detectedLang"], ...]
 async function translateBatch(texts) {
   const body = texts.map((t) => "q=" + encodeURIComponent(t)).join("&");
-  const res = await fetch(BATCH_URL, {
+  const res = await fetchTranslation(BATCH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" },
     body,
   });
-  if (!res.ok) throw new Error("Batch translate failed: HTTP " + res.status);
   const data = await res.json();
 
   // Normalize the response. With sl=auto each entry is [translated, detectedLang];
@@ -57,8 +81,7 @@ async function translateBatch(texts) {
 
 // Fallback single-text endpoint.
 async function translateSingle(text) {
-  const res = await fetch(SINGLE_URL + encodeURIComponent(text));
-  if (!res.ok) throw new Error("Single translate failed: HTTP " + res.status);
+  const res = await fetchTranslation(SINGLE_URL + encodeURIComponent(text), {});
   const data = await res.json();
   const segments = (data && data[0]) || [];
   let out = "";

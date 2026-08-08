@@ -251,7 +251,12 @@
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const result = results[itemSlots[i]];
-      if (!result || result.error) continue;
+      if (!result || result.error) {
+        // Request failed (rate limit, network blip) — retry later instead of
+        // leaving this text untranslated forever.
+        requeueItem(item);
+        continue;
+      }
 
       // If the source is already English (or translation is identical), leave it.
       const detected = (result.lang || "und").toLowerCase();
@@ -294,7 +299,14 @@
     const SLICE = 300;
     for (let i = 0; i < items.length; i += SLICE) {
       if (!state.enabled || state.siteDisabled) return;
-      await translateBatchOfItems(items.slice(i, i + SLICE));
+      const slice = items.slice(i, i + SLICE);
+      try {
+        await translateBatchOfItems(slice);
+      } catch (err) {
+        // Whole batch failed — put every item back in the queue for retry.
+        for (const item of slice) requeueItem(item);
+        console.warn("[Auto Translate] batch failed, will retry:", err);
+      }
     }
   }
 
@@ -344,8 +356,31 @@
   const observedRoots = new WeakSet();
   let pendingRoots = new Set();
   let flushTimer = null;
+  let scrollTimer = null;
+  let rescanning = false;
+
+  const retryCounts = new WeakMap();
+  const MAX_RETRIES = 3;
 
   const OBSERVER_CONFIG = { childList: true, subtree: true, characterData: true };
+
+  function scheduleFlush(delay = 350) {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flushPending, delay);
+  }
+
+  // Put a failed item back in the queue with backoff, up to MAX_RETRIES.
+  function requeueItem(item) {
+    const key = item.kind === "text" ? item.node : item.el;
+    if (!key.isConnected) return;
+    const tries = (retryCounts.get(key) || 0) + 1;
+    if (tries > MAX_RETRIES) return;
+    retryCounts.set(key, tries);
+    if (item.kind === "text") processedTextNodes.delete(item.node);
+    else processedAttrs.delete(item.el);
+    pendingRoots.add(key);
+    scheduleFlush(1200 * tries);
+  }
 
   function ensureObserver() {
     if (observer) return observer;
@@ -361,6 +396,7 @@
 
   function startObserver() {
     if (document.body) observeRoot(document.body);
+    window.addEventListener("scroll", onScroll, { passive: true, capture: true });
   }
 
   // Called by a newer copy of this script replacing an orphaned one.
@@ -373,6 +409,11 @@
       clearTimeout(flushTimer);
       flushTimer = null;
     }
+    if (scrollTimer) {
+      clearTimeout(scrollTimer);
+      scrollTimer = null;
+    }
+    window.removeEventListener("scroll", onScroll, true);
   }
 
   function onMutations(mutations) {
@@ -394,9 +435,29 @@
         }
       }
     }
-    if (pendingRoots.size > 0 && !flushTimer) {
-      flushTimer = setTimeout(flushPending, 350);
-    }
+    if (pendingRoots.size > 0) scheduleFlush();
+  }
+
+  // Safety net for content the observer can miss (late-attached shadow
+  // roots, virtualized lists): rescan the page after scrolling settles.
+  // Capture phase so scrolls inside nested containers are seen too.
+  function onScroll() {
+    if (!state.enabled || state.siteDisabled || state.showingOriginal) return;
+    if (scrollTimer) return;
+    scrollTimer = setTimeout(async () => {
+      scrollTimer = null;
+      if (rescanning || !document.body) return;
+      rescanning = true;
+      try {
+        const items = gatherItems(document.body);
+        if (items.length > 0) {
+          await translateItems(items);
+          if (state.status === "english" && state.translatedCount > 0) state.status = "done";
+        }
+      } finally {
+        rescanning = false;
+      }
+    }, 500);
   }
 
   async function flushPending() {
