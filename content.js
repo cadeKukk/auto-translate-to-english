@@ -2,8 +2,35 @@
 // and seamlessly replaces it with English in place.
 
 (() => {
-  if (window.__autoTranslateInjected) return;
-  window.__autoTranslateInjected = true;
+  // If a previous copy of this script is present, only defer to it when its
+  // extension context is still valid. After the extension is reloaded, old
+  // copies are orphaned (their chrome.runtime is dead) and must be replaced.
+  const prev = window.__autoTranslateInstance;
+  if (prev) {
+    let alive = false;
+    try {
+      alive = prev.isAlive();
+    } catch {
+      alive = false;
+    }
+    if (alive) return;
+    try {
+      prev.teardown();
+    } catch {
+      // Orphaned instance with nothing to clean up.
+    }
+  }
+  const myRuntime = chrome.runtime;
+  window.__autoTranslateInstance = {
+    isAlive: () => {
+      try {
+        return !!myRuntime.id;
+      } catch {
+        return false;
+      }
+    },
+    teardown: () => teardownInstance(),
+  };
 
   // ---------- State ----------
 
@@ -334,6 +361,18 @@
 
   function startObserver() {
     if (document.body) observeRoot(document.body);
+  }
+
+  // Called by a newer copy of this script replacing an orphaned one.
+  function teardownInstance() {
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
   }
 
   function onMutations(mutations) {

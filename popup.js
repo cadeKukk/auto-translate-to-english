@@ -9,6 +9,8 @@ const retranslateBtn = document.getElementById("retranslateBtn");
 
 let currentHost = null;
 let currentTabId = null;
+let urlAllowed = false;
+let injectionTried = false;
 let pollTimer = null;
 
 const langNames = new Intl.DisplayNames(["en"], { type: "language" });
@@ -44,9 +46,34 @@ function queryContentScript(message) {
   });
 }
 
+// Content scripts die when the extension is reloaded/updated, and pages
+// opened before install never got one. Inject on demand so the popup
+// works without requiring the user to refresh the tab.
+async function ensureContentScript() {
+  if (injectionTried || currentTabId === null || !urlAllowed) return false;
+  injectionTried = true;
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: currentTabId, allFrames: true },
+      files: ["content.js"],
+    });
+    return true;
+  } catch {
+    return false; // page is restricted (Web Store, file access disabled, etc.)
+  }
+}
+
 function renderStatus(s) {
   if (!s) {
-    setStatus("off", "Not available on this page", "Try a regular website tab.");
+    if (!urlAllowed) {
+      setStatus(
+        "off",
+        "Chrome doesn't allow extensions here",
+        "Chrome pages, the Web Store, and PDFs can't be translated."
+      );
+    } else {
+      setStatus("off", "Couldn't reach this page", "Refresh the tab and try again.");
+    }
     originalBtn.disabled = true;
     retranslateBtn.disabled = true;
     return;
@@ -93,7 +120,12 @@ function renderStatus(s) {
 }
 
 async function refreshStatus() {
-  const s = await queryContentScript({ type: "getStatus" });
+  let s = await queryContentScript({ type: "getStatus" });
+  if (!s && (await ensureContentScript())) {
+    // Give the fresh script a moment to boot, then ask again.
+    await new Promise((r) => setTimeout(r, 250));
+    s = await queryContentScript({ type: "getStatus" });
+  }
   renderStatus(s);
   // Keep polling while the page is actively being translated.
   if (s && (s.status === "detecting" || s.status === "translating")) {
@@ -107,8 +139,9 @@ async function init() {
   globalToggle.checked = cfg.enabled;
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab && tab.id !== undefined && /^(https?|file):/.test(tab.url || "")) {
+  if (tab && tab.id !== undefined) {
     currentTabId = tab.id;
+    urlAllowed = /^(https?|file):/.test(tab.url || "");
   }
   await refreshStatus();
 }
