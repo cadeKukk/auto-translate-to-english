@@ -12,7 +12,8 @@
     siteDisabled: false,
     showingOriginal: false,
     running: false,
-    detectedLang: null, // page-level detected language code
+    detectedLang: null, // page-level detected language code (advisory)
+    pageLikelyEnglish: false,
     translatedCount: 0,
     status: "idle", // idle | detecting | translating | done | english | disabled | error
   };
@@ -22,8 +23,13 @@
   // Every replacement we make, so we can restore originals.
   // { node, original, translated, attr } — attr is null for text nodes.
   const records = [];
+  const textRecords = new WeakMap(); // text node -> its record (so re-translations update in place)
   const processedTextNodes = new WeakSet();
   const processedAttrs = new WeakSet(); // elements whose attrs were handled
+
+  // Values we wrote ourselves, so the MutationObserver can tell our own
+  // writes apart from the page's framework updating text.
+  const selfWrites = new WeakMap();
 
   const SKIP_TAGS = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "CODE", "PRE", "KBD", "SAMP",
@@ -40,6 +46,7 @@
   // ---------- Helpers ----------
 
   const LETTER_RE = /\p{L}/u;
+  const NON_LATIN_LETTER_RE = /(?![\p{Script=Latin}])\p{L}/u;
   const URL_LIKE_RE = /^(https?:\/\/|www\.)\S+$/i;
   const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -48,6 +55,9 @@
     if (t.length < 2) return false;
     if (!LETTER_RE.test(t)) return false; // no letters at all (numbers, symbols)
     if (URL_LIKE_RE.test(t) || EMAIL_RE.test(t)) return false;
+    // On pages that are reliably English overall, only bother with segments
+    // containing non-Latin-script letters (CJK, Cyrillic, Arabic, ...).
+    if (state.pageLikelyEnglish && !NON_LATIN_LETTER_RE.test(t)) return false;
     return true;
   }
 
@@ -64,23 +74,50 @@
     let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
     while (el) {
       if (isSkippableElement(el)) return true;
-      el = el.parentElement;
+      // Step out of shadow roots into their hosts.
+      el = el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
     }
     return false;
   }
 
+  // Collects candidate text nodes, descending into open shadow roots.
   function collectTextNodes(root) {
     const nodes = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        if (processedTextNodes.has(node)) return NodeFilter.FILTER_REJECT;
-        if (!isTranslatableText(node.nodeValue)) return NodeFilter.FILTER_REJECT;
-        if (hasSkippableAncestor(node)) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    let n;
-    while ((n = walker.nextNode())) nodes.push(n);
+    const visit = (r) => {
+      const walker = document.createTreeWalker(
+        r,
+        NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+        {
+          acceptNode(node) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              if (isSkippableElement(node)) return NodeFilter.FILTER_REJECT;
+              if (node.shadowRoot) {
+                visit(node.shadowRoot);
+                observeRoot(node.shadowRoot);
+              }
+              return NodeFilter.FILTER_SKIP;
+            }
+            if (processedTextNodes.has(node)) return NodeFilter.FILTER_REJECT;
+            if (!isTranslatableText(node.nodeValue)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          },
+        }
+      );
+      let n;
+      while ((n = walker.nextNode())) nodes.push(n);
+    };
+    if (root.nodeType === Node.TEXT_NODE) {
+      if (
+        !processedTextNodes.has(root) &&
+        isTranslatableText(root.nodeValue) &&
+        !hasSkippableAncestor(root)
+      ) {
+        nodes.push(root);
+      }
+      return nodes;
+    }
+    if (hasSkippableAncestor(root)) return nodes;
+    visit(root);
     return nodes;
   }
 
@@ -141,7 +178,7 @@
       sample = sample.replace(/\s+/g, " ").slice(0, 2000);
       if (!sample || !chrome.i18n || !chrome.i18n.detectLanguage) {
         const htmlLang = (document.documentElement.lang || "").toLowerCase();
-        resolve({ lang: htmlLang.split("-")[0] || "und", reliable: !!htmlLang });
+        resolve({ lang: htmlLang.split("-")[0] || "und", reliable: false });
         return;
       }
       chrome.i18n.detectLanguage(sample, (result) => {
@@ -152,10 +189,15 @@
         const top = result.languages[0];
         resolve({
           lang: top.language,
-          reliable: result.isReliable && top.percentage >= 80,
+          reliable: result.isReliable && top.percentage >= 90,
         });
       });
     });
+  }
+
+  function setTextNodeValue(node, value) {
+    selfWrites.set(node, value);
+    node.nodeValue = value;
   }
 
   // ---------- Core translation pass ----------
@@ -196,9 +238,18 @@
         const original = node.nodeValue;
         if (translated === original.trim()) continue;
         const finalText = withOriginalWhitespace(original, translated);
-        node.nodeValue = finalText;
-        records.push({ node, original, translated: finalText, attr: null });
-        state.translatedCount++;
+        setTextNodeValue(node, finalText);
+
+        const existing = textRecords.get(node);
+        if (existing) {
+          existing.original = original;
+          existing.translated = finalText;
+        } else {
+          const record = { node, original, translated: finalText, attr: null };
+          records.push(record);
+          textRecords.set(node, record);
+          state.translatedCount++;
+        }
       } else {
         const { el, attr } = item;
         if (!el.isConnected) continue;
@@ -211,21 +262,7 @@
     }
   }
 
-  async function translateRoot(root) {
-    const textNodes = collectTextNodes(root);
-    const attrTargets = collectAttrTargets(root);
-
-    // Mark as processed up front so overlapping passes don't double-handle.
-    const items = [];
-    for (const node of textNodes) {
-      processedTextNodes.add(node);
-      items.push({ kind: "text", node });
-    }
-    for (const t of attrTargets) {
-      processedAttrs.add(t.el);
-      items.push({ kind: "attr", ...t });
-    }
-
+  async function translateItems(items) {
     // Process in slices so huge pages render progressively.
     const SLICE = 300;
     for (let i = 0; i < items.length; i += SLICE) {
@@ -234,26 +271,38 @@
     }
   }
 
+  function gatherItems(root) {
+    const items = [];
+    for (const node of collectTextNodes(root)) {
+      processedTextNodes.add(node);
+      items.push({ kind: "text", node });
+    }
+    for (const t of collectAttrTargets(root)) {
+      processedAttrs.add(t.el);
+      items.push({ kind: "attr", ...t });
+    }
+    return items;
+  }
+
   async function runFullTranslation() {
     if (state.running || !state.enabled || state.siteDisabled) return;
     state.running = true;
     state.status = "detecting";
 
+    // Watch for dynamic content no matter how the initial pass goes —
+    // many pages render their real content well after load.
+    startObserver();
+
     try {
       const detection = await detectPageLanguage();
       state.detectedLang = detection.lang;
-
-      // Skip pages that are reliably already in English.
-      if (detection.lang === "en" && detection.reliable) {
-        state.status = "english";
-        state.running = false;
-        return;
-      }
+      // Advisory only: used to filter obviously-English segments, never to
+      // skip the page outright (mixed-language pages would be missed).
+      state.pageLikelyEnglish = detection.lang === "en" && detection.reliable;
 
       state.status = "translating";
-      await translateRoot(document.body);
-      state.status = "done";
-      startObserver();
+      await translateItems(gatherItems(document.body));
+      state.status = state.translatedCount === 0 && state.pageLikelyEnglish ? "english" : "done";
     } catch (err) {
       state.status = "error";
       console.warn("[Auto Translate] failed:", err);
@@ -265,25 +314,50 @@
   // ---------- Dynamic content ----------
 
   let observer = null;
+  const observedRoots = new WeakSet();
   let pendingRoots = new Set();
   let flushTimer = null;
 
+  const OBSERVER_CONFIG = { childList: true, subtree: true, characterData: true };
+
+  function ensureObserver() {
+    if (observer) return observer;
+    observer = new MutationObserver(onMutations);
+    return observer;
+  }
+
+  function observeRoot(root) {
+    if (!root || observedRoots.has(root)) return;
+    observedRoots.add(root);
+    ensureObserver().observe(root, OBSERVER_CONFIG);
+  }
+
   function startObserver() {
-    if (observer || !document.body) return;
-    observer = new MutationObserver((mutations) => {
-      if (!state.enabled || state.siteDisabled || state.showingOriginal) return;
-      for (const m of mutations) {
-        for (const node of m.addedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
-            pendingRoots.add(node);
-          }
+    if (document.body) observeRoot(document.body);
+  }
+
+  function onMutations(mutations) {
+    if (!state.enabled || state.siteDisabled || state.showingOriginal) return;
+    for (const m of mutations) {
+      if (m.type === "characterData") {
+        const node = m.target;
+        if (node.nodeType !== Node.TEXT_NODE) continue;
+        // Ignore mutations caused by our own writes.
+        if (selfWrites.get(node) === node.nodeValue) continue;
+        // The page changed this text after we processed it — do it again.
+        processedTextNodes.delete(node);
+        pendingRoots.add(node);
+        continue;
+      }
+      for (const node of m.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE) {
+          pendingRoots.add(node);
         }
       }
-      if (pendingRoots.size > 0 && !flushTimer) {
-        flushTimer = setTimeout(flushPending, 350);
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    }
+    if (pendingRoots.size > 0 && !flushTimer) {
+      flushTimer = setTimeout(flushPending, 350);
+    }
   }
 
   async function flushPending() {
@@ -294,35 +368,13 @@
     const items = [];
     for (const root of roots) {
       if (!root.isConnected) continue;
-      if (root.nodeType === Node.TEXT_NODE) {
-        if (
-          !processedTextNodes.has(root) &&
-          isTranslatableText(root.nodeValue) &&
-          !hasSkippableAncestor(root)
-        ) {
-          processedTextNodes.add(root);
-          items.push({ kind: "text", node: root });
-        }
-        continue;
-      }
-      if (hasSkippableAncestor(root)) continue;
-      for (const node of collectTextNodes(root)) {
-        processedTextNodes.add(node);
-        items.push({ kind: "text", node });
-      }
-      for (const t of collectAttrTargets(root)) {
-        processedAttrs.add(t.el);
-        items.push({ kind: "attr", ...t });
-      }
+      items.push(...gatherItems(root));
     }
 
     if (items.length === 0) return;
     try {
-      const SLICE = 300;
-      for (let i = 0; i < items.length; i += SLICE) {
-        await translateBatchOfItems(items.slice(i, i + SLICE));
-      }
-      if (state.status === "english") state.status = "done";
+      await translateItems(items);
+      if (state.status === "english" && state.translatedCount > 0) state.status = "done";
     } catch (err) {
       console.warn("[Auto Translate] dynamic content failed:", err);
     }
@@ -336,7 +388,7 @@
       if (r.attr) {
         r.node.setAttribute(r.attr, r.original);
       } else {
-        r.node.nodeValue = r.original;
+        setTextNodeValue(r.node, r.original);
       }
     }
     state.showingOriginal = true;
@@ -348,7 +400,7 @@
       if (r.attr) {
         r.node.setAttribute(r.attr, r.translated);
       } else {
-        r.node.nodeValue = r.translated;
+        setTextNodeValue(r.node, r.translated);
       }
     }
     state.showingOriginal = false;
