@@ -1,5 +1,6 @@
 const globalToggle = document.getElementById("globalToggle");
 const siteToggle = document.getElementById("siteToggle");
+const imagesToggle = document.getElementById("imagesToggle");
 const siteHost = document.getElementById("siteHost");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
@@ -86,6 +87,14 @@ function renderStatus(s) {
 
   const lang = languageName(s.detectedLang);
   const count = s.translatedCount;
+  const images = s.imagesTranslated || 0;
+  const doneDetail =
+    [
+      count > 0 ? `${count} text segments replaced` : "",
+      images > 0 ? `${images} image${images === 1 ? "" : "s"} repainted` : "",
+    ]
+      .filter(Boolean)
+      .join(", ") || "";
 
   switch (s.status) {
     case "detecting":
@@ -97,8 +106,8 @@ function renderStatus(s) {
     case "done":
       setStatus(
         "ok",
-        count > 0 ? `Translated from ${lang}` : "Nothing needed translating",
-        count > 0 ? `${count} text segments replaced with English` : ""
+        count > 0 || images > 0 ? `Translated from ${lang}` : "Nothing needed translating",
+        doneDetail
       );
       break;
     case "english":
@@ -114,7 +123,7 @@ function renderStatus(s) {
       setStatus("off", "Waiting\u2026");
   }
 
-  originalBtn.disabled = count === 0;
+  originalBtn.disabled = count === 0 && images === 0;
   originalBtn.textContent = s.showingOriginal ? "Show translation" : "Show original";
   retranslateBtn.disabled = !s.enabled || s.siteDisabled;
 }
@@ -135,8 +144,13 @@ async function refreshStatus() {
 }
 
 async function init() {
-  const cfg = await chrome.storage.sync.get({ enabled: true, disabledSites: [] });
+  const cfg = await chrome.storage.sync.get({
+    enabled: true,
+    disabledSites: [],
+    translateImages: true,
+  });
   globalToggle.checked = cfg.enabled;
+  imagesToggle.checked = cfg.translateImages;
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab && tab.id !== undefined) {
@@ -149,6 +163,11 @@ async function init() {
 globalToggle.addEventListener("change", async () => {
   await chrome.storage.sync.set({ enabled: globalToggle.checked });
   siteToggle.disabled = !globalToggle.checked;
+  setTimeout(refreshStatus, 300);
+});
+
+imagesToggle.addEventListener("change", async () => {
+  await chrome.storage.sync.set({ translateImages: imagesToggle.checked });
   setTimeout(refreshStatus, 300);
 });
 

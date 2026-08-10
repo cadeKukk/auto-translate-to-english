@@ -37,11 +37,13 @@
   const state = {
     enabled: true,
     siteDisabled: false,
+    translateImages: true,
     showingOriginal: false,
     running: false,
     detectedLang: null, // page-level detected language code (advisory)
     pageLikelyEnglish: false,
     translatedCount: 0,
+    imagesTranslated: 0,
     status: "idle", // idle | detecting | translating | done | english | disabled | error
   };
 
@@ -340,6 +342,8 @@
       state.pageLikelyEnglish = detection.lang === "en" && detection.reliable;
 
       state.status = "translating";
+      // Images register after detection so OCR knows which language to expect.
+      registerImages(document.body);
       await translateItems(gatherItems(document.body));
       state.status = state.translatedCount === 0 && state.pageLikelyEnglish ? "english" : "done";
     } catch (err) {
@@ -413,6 +417,10 @@
       clearTimeout(scrollTimer);
       scrollTimer = null;
     }
+    if (imageObserver) {
+      imageObserver.disconnect();
+      imageObserver = null;
+    }
     window.removeEventListener("scroll", onScroll, true);
   }
 
@@ -449,6 +457,7 @@
       if (rescanning || !document.body) return;
       rescanning = true;
       try {
+        registerImages(document.body);
         const items = gatherItems(document.body);
         if (items.length > 0) {
           await translateItems(items);
@@ -469,6 +478,7 @@
     for (const root of roots) {
       if (!root.isConnected) continue;
       items.push(...gatherItems(root));
+      registerImages(root);
     }
 
     if (items.length === 0) return;
@@ -480,12 +490,239 @@
     }
   }
 
+  // ---------- Images (OCR) ----------
+
+  const processedImages = new WeakSet();
+  let imageObserver = null;
+  const imageQueue = [];
+  let imageQueueRunning = false;
+  let imagesStarted = 0;
+  const MAX_IMAGES_PER_PAGE = 40;
+
+  function imageTranslationActive() {
+    return state.translateImages && state.enabled && !state.siteDisabled;
+  }
+
+  function imageEligible(img) {
+    const src = img.currentSrc || img.src || "";
+    if (!/^(https?:|data:image\/)/.test(src)) return false;
+    if (src.startsWith("data:image/svg")) return false;
+    if (hasSkippableAncestor(img)) return false;
+    const rect = img.getBoundingClientRect();
+    // Skip icons and thumbnails — too small to hold readable text.
+    return rect.width >= 100 && rect.height >= 50;
+  }
+
+  function ensureImageObserver() {
+    if (imageObserver) return imageObserver;
+    // OCR is expensive, so only process images that come near the viewport.
+    imageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const img = entry.target;
+          imageObserver.unobserve(img);
+          if (!imageTranslationActive() || processedImages.has(img)) continue;
+          if (!imageEligible(img)) continue;
+          if (imagesStarted >= MAX_IMAGES_PER_PAGE) continue;
+          processedImages.add(img);
+          imagesStarted++;
+          imageQueue.push(img);
+          pumpImageQueue();
+        }
+      },
+      { rootMargin: "300px" }
+    );
+    return imageObserver;
+  }
+
+  function registerImages(root) {
+    if (!imageTranslationActive() || !root) return;
+    if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_NODE) return;
+    const obs = ensureImageObserver();
+    if (root.tagName === "IMG") {
+      if (!processedImages.has(root)) obs.observe(root);
+      return;
+    }
+    const imgs = root.querySelectorAll ? root.querySelectorAll("img") : [];
+    for (const img of imgs) {
+      if (!processedImages.has(img)) obs.observe(img);
+    }
+  }
+
+  async function pumpImageQueue() {
+    if (imageQueueRunning) return;
+    imageQueueRunning = true;
+    try {
+      while (imageQueue.length > 0) {
+        if (!imageTranslationActive()) {
+          imageQueue.length = 0;
+          break;
+        }
+        const img = imageQueue.shift();
+        try {
+          await translateImage(img);
+        } catch (err) {
+          console.debug("[Auto Translate] image skipped:", err.message);
+        }
+      }
+    } finally {
+      imageQueueRunning = false;
+    }
+  }
+
+  function sendTranslateImage(src) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        { type: "translateImage", src, pageLang: state.detectedLang },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (response && response.ok) {
+            resolve(response);
+          } else {
+            reject(new Error((response && response.error) || "Image translation failed"));
+          }
+        }
+      );
+    });
+  }
+
+  // Repaints one recognized text line: covers the original text with the
+  // surrounding background color, then draws the English on top.
+  function paintLine(ctx, canvas, line) {
+    const x0 = Math.max(0, Math.floor(line.bbox.x0 * canvas.width) - 2);
+    const y0 = Math.max(0, Math.floor(line.bbox.y0 * canvas.height) - 2);
+    const x1 = Math.min(canvas.width, Math.ceil(line.bbox.x1 * canvas.width) + 2);
+    const y1 = Math.min(canvas.height, Math.ceil(line.bbox.y1 * canvas.height) + 2);
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w < 8 || h < 8) return;
+
+    // Average the pixels in a ring just outside the box to estimate the
+    // background color behind the text.
+    const pad = Math.max(2, Math.round(h * 0.2));
+    const sx = Math.max(0, x0 - pad);
+    const sy = Math.max(0, y0 - pad);
+    const sw = Math.min(canvas.width - sx, w + pad * 2);
+    const sh = Math.min(canvas.height - sy, h + pad * 2);
+    let r = 240, g = 240, b = 240;
+    try {
+      const data = ctx.getImageData(sx, sy, sw, sh).data;
+      let rs = 0, gs = 0, bs = 0, n = 0;
+      for (let y = 0; y < sh; y++) {
+        for (let x = 0; x < sw; x++) {
+          const isRing = x < pad || y < pad || x >= sw - pad || y >= sh - pad;
+          if (!isRing) continue;
+          const o = (y * sw + x) * 4;
+          rs += data[o];
+          gs += data[o + 1];
+          bs += data[o + 2];
+          n++;
+        }
+      }
+      if (n > 0) {
+        r = Math.round(rs / n);
+        g = Math.round(gs / n);
+        b = Math.round(bs / n);
+      }
+    } catch {
+      // Keep the light-gray fallback if pixel access fails.
+    }
+
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(x0, y0, w, h);
+
+    // Black or white text, whichever contrasts with the fill.
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    ctx.fillStyle = luminance > 140 ? "#111" : "#fff";
+
+    let fontSize = Math.floor(h * 0.72);
+    while (fontSize > 9) {
+      ctx.font = `600 ${fontSize}px -apple-system, "Segoe UI", Arial, sans-serif`;
+      if (ctx.measureText(line.translated).width <= w - 6) break;
+      fontSize--;
+    }
+    ctx.textBaseline = "middle";
+    ctx.fillText(line.translated, x0 + 3, y0 + h / 2 + 1, w - 6);
+  }
+
+  function applyImgTranslated(record) {
+    for (const s of record.sources) s.el.removeAttribute("srcset");
+    record.node.removeAttribute("srcset");
+    record.node.src = record.translated;
+  }
+
+  function applyImgOriginal(record) {
+    for (const s of record.sources) {
+      if (s.srcset != null) s.el.setAttribute("srcset", s.srcset);
+    }
+    if (record.originalSrcset != null) {
+      record.node.setAttribute("srcset", record.originalSrcset);
+    }
+    if (record.originalSrcAttr != null) {
+      record.node.setAttribute("src", record.originalSrcAttr);
+    } else {
+      record.node.removeAttribute("src");
+    }
+  }
+
+  async function translateImage(img) {
+    const src = img.currentSrc || img.src;
+    if (!src) return;
+    const payload = await sendTranslateImage(src);
+    if (!payload.lines || payload.lines.length === 0 || !payload.dataUrl) return;
+    if (!img.isConnected || state.showingOriginal) return;
+
+    const base = new Image();
+    base.src = payload.dataUrl;
+    await base.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = base.naturalWidth;
+    canvas.height = base.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(base, 0, 0);
+    for (const line of payload.lines) paintLine(ctx, canvas, line);
+
+    const record = {
+      node: img,
+      img: true,
+      sources: [],
+      originalSrcAttr: img.getAttribute("src"),
+      originalSrcset: img.getAttribute("srcset"),
+      original: src,
+      translated: canvas.toDataURL("image/png"),
+      attr: null,
+    };
+    // <source> elements inside <picture> override the img src.
+    const picture = img.parentElement;
+    if (picture && picture.tagName === "PICTURE") {
+      for (const s of picture.querySelectorAll("source")) {
+        record.sources.push({ el: s, srcset: s.getAttribute("srcset") });
+      }
+    }
+
+    applyImgTranslated(record);
+    records.push(record);
+    state.imagesTranslated++;
+    if (state.status === "english") state.status = "done";
+  }
+
+  function restoreImages() {
+    for (const r of records) {
+      if (r.img && r.node.isConnected) applyImgOriginal(r);
+    }
+  }
+
   // ---------- Restore / re-apply ----------
 
   function showOriginal() {
     for (const r of records) {
       if (!r.node.isConnected) continue;
-      if (r.attr) {
+      if (r.img) {
+        applyImgOriginal(r);
+      } else if (r.attr) {
         r.node.setAttribute(r.attr, r.original);
       } else {
         setTextNodeValue(r.node, r.original);
@@ -497,7 +734,9 @@
   function showTranslated() {
     for (const r of records) {
       if (!r.node.isConnected) continue;
-      if (r.attr) {
+      if (r.img) {
+        applyImgTranslated(r);
+      } else if (r.attr) {
         r.node.setAttribute(r.attr, r.translated);
       } else {
         setTextNodeValue(r.node, r.translated);
@@ -509,15 +748,19 @@
   // ---------- Settings & messaging ----------
 
   function loadSettingsAndStart() {
-    chrome.storage.sync.get({ enabled: true, disabledSites: [] }, (cfg) => {
-      state.enabled = cfg.enabled;
-      state.siteDisabled = cfg.disabledSites.includes(HOST);
-      if (state.enabled && !state.siteDisabled) {
-        runFullTranslation();
-      } else {
-        state.status = "disabled";
+    chrome.storage.sync.get(
+      { enabled: true, disabledSites: [], translateImages: true },
+      (cfg) => {
+        state.enabled = cfg.enabled;
+        state.siteDisabled = cfg.disabledSites.includes(HOST);
+        state.translateImages = cfg.translateImages;
+        if (state.enabled && !state.siteDisabled) {
+          runFullTranslation();
+        } else {
+          state.status = "disabled";
+        }
       }
-    });
+    );
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -536,6 +779,14 @@
         state.siteDisabled = nowDisabled;
         if (nowDisabled) shouldRestore = true;
         else if (state.enabled) shouldStart = true;
+      }
+    }
+    if (changes.translateImages) {
+      state.translateImages = changes.translateImages.newValue;
+      if (state.translateImages) {
+        if (state.enabled && !state.siteDisabled) registerImages(document.body);
+      } else {
+        restoreImages();
       }
     }
 
@@ -560,6 +811,7 @@
           showingOriginal: state.showingOriginal,
           detectedLang: state.detectedLang,
           translatedCount: state.translatedCount,
+          imagesTranslated: state.imagesTranslated,
           status: state.status,
         });
         break;

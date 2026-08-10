@@ -11,6 +11,7 @@ A Chrome extension that automatically detects the language of any webpage and se
 - **Show original** — flip back to the untranslated page at any time from the popup.
 - **Per-site control** — disable translation globally or for specific sites.
 - **No API key required** — uses Google's public web translation endpoint, with caching to minimize requests.
+- **Text in images** — recognizes text inside images with on-device OCR (Tesseract), translates it, and repaints the image with English text over the original (Google Lens-style). Toggleable in the popup.
 
 ## Installation
 
@@ -42,6 +43,13 @@ python3 -m http.server 8080
 # then visit http://localhost:8080/test.html
 ```
 
+## Image translation notes
+
+- Images are processed only as they approach the viewport, one at a time, to keep pages responsive. Small images (icons, thumbnails) are skipped.
+- The OCR language model for the page's detected language is downloaded once (a few MB) and cached, so the first foreign-language image on a new language takes longest.
+- OCR works best on clear, horizontal text (banners, screenshots, memes). Stylized logos, handwriting, and text on busy photos may be missed — those are left untouched rather than repainted badly.
+- CSS `background-image` text is not supported, only `<img>` elements.
+
 ## Files
 
 | File | Purpose |
@@ -50,6 +58,8 @@ python3 -m http.server 8080
 | `background.js` | Service worker that performs translation requests and caching |
 | `content.js` | Finds, translates, and replaces page text; watches for dynamic content |
 | `popup.html/css/js` | Toolbar popup UI |
+| `offscreen.html/js` | Offscreen document that runs the Tesseract OCR engine |
+| `vendor/` | Bundled Tesseract.js runtime (OCR) |
 | `icons/` | Extension icons |
 | `make_icons.py` | Script that generated the icons (not needed at runtime) |
 | `test.html` | Multi-language demo page for testing |

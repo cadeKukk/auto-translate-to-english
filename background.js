@@ -163,10 +163,87 @@ async function handleTranslate(texts) {
   return results;
 }
 
+// ---------- Image OCR + translation ----------
+
+// Maps page language codes to Tesseract traineddata names.
+const TESS_LANGS = {
+  zh: "chi_sim", "zh-cn": "chi_sim", "zh-tw": "chi_tra", ja: "jpn", ko: "kor",
+  ru: "rus", uk: "ukr", bg: "bul", ar: "ara", fa: "fas", he: "heb", hi: "hin",
+  th: "tha", vi: "vie", el: "ell", es: "spa", fr: "fra", de: "deu", it: "ita",
+  pt: "por", nl: "nld", pl: "pol", tr: "tur", sv: "swe", da: "dan", fi: "fin",
+  no: "nor", cs: "ces", ro: "ron", hu: "hun", id: "ind",
+};
+
+function tessLangsFor(pageLang) {
+  const mapped = TESS_LANGS[(pageLang || "").toLowerCase()];
+  return mapped ? mapped + "+eng" : "eng";
+}
+
+let offscreenCreating = null;
+
+async function ensureOffscreenDocument() {
+  if (await chrome.offscreen.hasDocument()) return;
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen
+      .createDocument({
+        url: "offscreen.html",
+        reasons: ["WORKERS"],
+        justification: "Runs the Tesseract OCR engine to read text in images",
+      })
+      .finally(() => {
+        offscreenCreating = null;
+      });
+  }
+  await offscreenCreating;
+}
+
+// Cache finished image results by URL+langs so repeat visits are instant.
+const imageCache = new Map();
+const IMAGE_CACHE_MAX = 200;
+
+async function handleTranslateImage(src, pageLang) {
+  const langs = tessLangsFor(pageLang);
+  const cacheKey = langs + "|" + src;
+  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
+
+  await ensureOffscreenDocument();
+  const ocr = await chrome.runtime.sendMessage({ target: "offscreen", type: "ocr", src, langs });
+  if (!ocr || !ocr.ok) throw new Error((ocr && ocr.error) || "OCR failed");
+
+  let payload = { lines: [], dataUrl: null };
+  if (ocr.lines.length > 0) {
+    const translations = await handleTranslate(ocr.lines.map((l) => l.text));
+    const lines = [];
+    for (let i = 0; i < ocr.lines.length; i++) {
+      const t = translations[i];
+      if (!t || t.error) continue;
+      const lang = (t.lang || "und").toLowerCase();
+      // Only repaint lines that are genuinely foreign text.
+      if (lang === "en" || lang === "und") continue;
+      if (t.text.trim() === ocr.lines[i].text.trim()) continue;
+      lines.push({ bbox: ocr.lines[i].bbox, original: ocr.lines[i].text, translated: t.text });
+    }
+    if (lines.length > 0) payload = { lines, dataUrl: ocr.dataUrl };
+  }
+
+  if (imageCache.size >= IMAGE_CACHE_MAX) {
+    imageCache.delete(imageCache.keys().next().value);
+  }
+  imageCache.set(cacheKey, payload);
+  return payload;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message && message.type === "translate" && Array.isArray(message.texts)) {
+  if (!message || message.target === "offscreen") return;
+  if (message.type === "translate" && Array.isArray(message.texts)) {
     handleTranslate(message.texts)
       .then((results) => sendResponse({ ok: true, results }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true; // async response
+  }
+  if (message.type === "translateImage" && typeof message.src === "string") {
+    handleTranslateImage(message.src, message.pageLang)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((err) => sendResponse({ ok: false, error: String(err) }));
     return true; // async response
   }
