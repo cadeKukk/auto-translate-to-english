@@ -233,6 +233,27 @@ async function handleTranslateImage(src, pageLang) {
   return payload;
 }
 
+// On install/update, inject the content script into all open tabs so users
+// don't have to refresh them (old copies detect the reload and shut down).
+chrome.runtime.onInstalled.addListener(async () => {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+  } catch {
+    return;
+  }
+  for (const tab of tabs) {
+    chrome.scripting
+      .executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["content.js"],
+      })
+      .catch(() => {
+        // Tab is restricted (Web Store, discarded, etc.) — skip it.
+      });
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target === "offscreen") return;
   if (message.type === "translate" && Array.isArray(message.texts)) {

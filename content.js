@@ -296,6 +296,16 @@
     }
   }
 
+  // False once the extension has been reloaded/updated, which severs this
+  // copy of the script from the extension until a fresh copy replaces it.
+  function contextAlive() {
+    try {
+      return !!chrome.runtime.id;
+    } catch {
+      return false;
+    }
+  }
+
   async function translateItems(items) {
     // Process in slices so huge pages render progressively.
     const SLICE = 300;
@@ -305,6 +315,12 @@
       try {
         await translateBatchOfItems(slice);
       } catch (err) {
+        if (!contextAlive()) {
+          // Orphaned by an extension reload — stop quietly. The new
+          // extension instance injects a fresh copy of this script.
+          teardownInstance();
+          return;
+        }
         // Whole batch failed — put every item back in the queue for retry.
         for (const item of slice) requeueItem(item);
         console.warn("[Auto Translate] batch failed, will retry:", err);
@@ -421,6 +437,8 @@
       imageObserver.disconnect();
       imageObserver = null;
     }
+    imageQueue.length = 0;
+    pendingRoots.clear();
     window.removeEventListener("scroll", onScroll, true);
   }
 
@@ -563,6 +581,10 @@
         try {
           await translateImage(img);
         } catch (err) {
+          if (!contextAlive()) {
+            teardownInstance();
+            return;
+          }
           console.debug("[Auto Translate] image skipped:", err.message);
         }
       }
