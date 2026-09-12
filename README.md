@@ -2,6 +2,16 @@
 
 A Chrome extension that automatically detects the language of any webpage and seamlessly replaces its text with English — no clicks needed.
 
+## Demo page
+
+![Untranslated fixture with French, German, Spanish, Japanese, and an image](docs/screenshots/test-page.png)
+
+This is the bundled [test page](test.html) before translation. It is a local browser capture from 2026-09-12, not a translated result.
+
+Load the extension, serve this directory with `python3 -m http.server 8080`, and open `http://localhost:8080/test.html`. Compare the French heading with the translated text, use Show original to switch back, then use the page's button to add dynamic text. English text and code blocks should stay unchanged.
+
+The same page includes [an image fixture](test-image.png) for the OCR toggle. Translation still needs a network connection even when the page is local.
+
 ## Features
 
 - **Automatic language detection** — uses Chrome's built-in detector to identify the page language, plus per-segment detection so mixed-language pages are handled correctly.
