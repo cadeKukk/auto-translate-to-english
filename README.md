@@ -1,21 +1,31 @@
 # Auto Translate to English
 
-A Chrome extension that automatically detects the language of any webpage and seamlessly replaces its text with English — no clicks needed.
+A Chrome extension that detects the language of a webpage and replaces its text with English in place, without a click.
 
-## Demo page
+![The bundled test page before (left: French, German, Spanish and Japanese) and after the extension runs (right: all English; the code sample and the translate="no" line stay as they were)](docs/screenshots/before-after.png)
 
-![Untranslated fixture with French, German, Spanish, Japanese, and an image](docs/screenshots/test-page.png)
+The bundled [test page](test.html) before and after the extension loads, captured in Chrome 156 on 2026-11-04. The English paragraph, the code sample and the line marked `translate="no"` are left alone, and so is the input's placeholder. The page also has [an image fixture](test-image.png) for OCR translation; it wasn't repainted in this headless capture, so it isn't shown here.
 
-This is the bundled [test page](test.html) before translation. It is a local browser capture from 2026-09-12, not a translated result.
+## How it works
 
-Load the extension, serve this directory with `python3 -m http.server 8080`, and open `http://localhost:8080/test.html`. Compare the French heading with the translated text, use Show original to switch back, then use the page's button to add dynamic text. English text and code blocks should stay unchanged.
+```mermaid
+flowchart LR
+  page["Web page"] -->|text nodes| content["content.js"]
+  content -->|"translate (batched)"| bg["background.js<br/>service worker + cache"]
+  bg -->|HTTPS| google["translate.googleapis.com"]
+  content -->|"images near the viewport"| bg
+  bg -->|OCR request| off["offscreen.js<br/>Tesseract.js"]
+  popup["popup.js"] <-->|"status, show original, re-translate"| content
+  popup -->|settings| storage[("chrome.storage.sync")]
+  storage --> content
+```
 
-The same page includes [an image fixture](test-image.png) for the OCR toggle. Translation still needs a network connection even when the page is local.
+`content.js` finds the page's text, sends it to the service worker in batches and writes the English back into the same elements. The service worker calls Google's public translation endpoint and keeps an in-memory cache. Images go through an offscreen document that runs Tesseract, then their recognised text is translated the same way.
 
 ## Features
 
 - **Automatic language detection** — uses Chrome's built-in detector to identify the page language, plus per-segment detection so mixed-language pages are handled correctly.
-- **Seamless in-place replacement** — text is swapped directly in the page's own elements, so layout, styling, and interactivity are untouched.
+- **In-place replacement** — text is swapped directly in the page's own elements, so layout, styling, and interactivity are untouched.
 - **Dynamic content support** — new text added by infinite scroll, single-page apps, chat feeds, etc. is translated as it appears.
 - **Smart skipping** — pages already in English are left alone, as are code blocks, inputs, URLs, numbers, and elements marked `translate="no"` / `.notranslate`.
 - **Show original** — flip back to the untranslated page at any time from the popup.
@@ -28,7 +38,7 @@ The same page includes [an image fixture](test-image.png) for the OCR toggle. Tr
 1. Open Chrome and go to `chrome://extensions`.
 2. Turn on **Developer mode** (toggle in the top-right corner).
 3. Click **Load unpacked**.
-4. Select this folder (`auto translate`).
+4. Select this folder (the one with `manifest.json` in it).
 5. Visit any non-English webpage — it translates automatically.
 
 ## Usage
@@ -44,14 +54,16 @@ Click the extension icon to:
 
 ## Testing
 
-Open `test.html` (in this folder) in Chrome after installing the extension — it contains French, German, Spanish, and Japanese text, plus a button that injects new foreign-language text dynamically, so you can watch it get translated live.
-
-To test with a local `file://` page, enable **Allow access to file URLs** for this extension on `chrome://extensions`. Alternatively, serve the page over HTTP:
+After loading the extension, serve this folder and open the test page:
 
 ```bash
 python3 -m http.server 8080
 # then visit http://localhost:8080/test.html
 ```
+
+It has French, German, Spanish and Japanese text, an English paragraph and code that should stay as they are, an image for OCR, and a button that adds foreign-language text after load so you can watch it get translated. Use **Show original** in the popup to switch back. Translation needs a network connection even for a local page.
+
+To open `test.html` as a `file://` page instead, turn on **Allow access to file URLs** for the extension on `chrome://extensions`.
 
 ## Image translation notes
 
@@ -72,4 +84,5 @@ python3 -m http.server 8080
 | `vendor/` | Bundled Tesseract.js runtime (OCR) |
 | `icons/` | Extension icons |
 | `make_icons.py` | Script that generated the icons (not needed at runtime) |
-| `test.html` | Multi-language demo page for testing |
+| `test.html`, `test-image.png` | Multi-language test page and its OCR image |
+| `docs/screenshots/` | README images |
