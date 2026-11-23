@@ -89,7 +89,7 @@ There is no account, API key or analytics.
 
 ## Known issue
 
-Text in images is not translated at the moment. In Chrome 156 the Tesseract worker fails to start: the offscreen page logs `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://…/vendor/worker.min.js' failed to load`, and the image is left as it was. Page text is not affected. Reproduced on the bundled test page on 2026-11-23.
+Text in images is not translated at the moment. In Chrome 158 the Tesseract worker fails to start: the offscreen page logs `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://…/vendor/worker.min.js' failed to load`, and the image is left as it was. Page text is not affected. Reproduced on the bundled test page on 2026-11-23.
 
 ## Image translation notes
 
