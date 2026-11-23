@@ -29,6 +29,9 @@ function getWorker(langs) {
       langs,
       Tesseract.createWorker(langs, 1, {
         workerPath: chrome.runtime.getURL("vendor/worker.min.js"),
+        // Load the worker file directly. Tesseract's default wraps it in a
+        // blob: worker, and importScripts() of an extension URL fails there.
+        workerBlobURL: false,
         corePath: chrome.runtime.getURL("vendor/tesseract-core-simd-lstm.wasm.js"),
         langPath: "https://tessdata.projectnaptha.com/4.0.0",
         gzip: true,
