@@ -4,7 +4,7 @@ A Chrome extension that detects the language of a webpage and replaces its text 
 
 ![The bundled test page before (left: French, German, Spanish and Japanese) and after the extension runs (right: all English; the code sample and the translate="no" line stay as they were)](docs/screenshots/before-after.png)
 
-The bundled [test page](test.html) before and after the extension loads, captured in Chrome 156 on 2026-11-04. The English paragraph, the code sample and the line marked `translate="no"` are left alone, and so is the input's placeholder. The page also has [an image fixture](test-image.png) for OCR translation; it wasn't repainted in this headless capture, so it isn't shown here.
+The bundled [test page](test.html) before and after the extension loads, captured in Chrome 156 on 2026-11-04. The English paragraph, the code sample and the line marked `translate="no"` are left alone, and so is the input's placeholder. The page also has [an image fixture](test-image.png) for OCR translation; it isn't repainted at the moment (see [Known issue](#known-issue)), so it isn't shown here.
 
 ## How it works
 
@@ -52,6 +52,10 @@ Click the extension icon to:
 - Switch between the translation and the original text.
 - Force a re-translation.
 
+<img src="docs/screenshots/popup.png" width="300" alt="The extension popup on the test page: a green dot with Translated from Spanish and 8 text segments replaced, three switches (Auto-translate, Enable on this site: localhost, Translate text in images), and the buttons Show original and Translate again">
+
+The popup on the bundled test page, captured in headless Chrome on 2026-11-23 with the extension loaded unpacked. The popup was opened as a tab and pointed at the test page's tab; its status, switches and buttons are the real ones. It names one language per page, the one Chrome's detector reports, which on this mixed-language page was Spanish.
+
 ## Testing
 
 After loading the extension, serve this folder and open the test page:
@@ -64,6 +68,28 @@ python3 -m http.server 8080
 It has French, German, Spanish and Japanese text, an English paragraph and code that should stay as they are, an image for OCR, and a button that adds foreign-language text after load so you can watch it get translated. Use **Show original** in the popup to switch back. Translation needs a network connection even for a local page.
 
 To open `test.html` as a `file://` page instead, turn on **Allow access to file URLs** for the extension on `chrome://extensions`.
+
+## What leaves your browser
+
+- **Page text.** Every piece of text the extension decides to translate is sent over HTTPS to `translate.googleapis.com`, Google's public translation endpoint. That includes text on pages you are signed in to. Turn the extension off for a site in the popup if you don't want its text sent.
+- **Image text.** OCR runs inside the browser (Tesseract compiled to WebAssembly, bundled in `vendor/`). The image itself is not uploaded; only the lines of text recognised in it go to the same translation endpoint. The OCR language data is downloaded from `tessdata.projectnaptha.com` the first time a language is needed.
+- **Settings.** The three switches and the list of disabled sites are stored in `chrome.storage.sync`, which Chrome syncs to your Google account if sync is on. Translations are cached in memory only and are gone when the service worker stops.
+
+There is no account, API key or analytics.
+
+### Permissions
+
+| Permission | Why it is asked for |
+| --- | --- |
+| `<all_urls>` (host) | Read and replace text on any page, and fetch a page's images for OCR |
+| `storage` | Save the popup's switches and the disabled-sites list |
+| `scripting` | Inject `content.js` into tabs that were already open at install time, or after the extension is reloaded |
+| `activeTab` | Access to the tab the popup is opened on |
+| `offscreen` | Open the hidden page that runs Tesseract (a service worker can't host it) |
+
+## Known issue
+
+Text in images is not translated at the moment. In Chrome 156 the Tesseract worker fails to start: the offscreen page logs `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://…/vendor/worker.min.js' failed to load`, and the image is left as it was. Page text is not affected. Reproduced on the bundled test page on 2026-11-23.
 
 ## Image translation notes
 
